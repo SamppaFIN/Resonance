@@ -1,0 +1,1565 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Resonance</title>
+<style>
+  :root {
+    --bg: #0a0a0f;
+    --dot-color: rgba(220, 220, 240, 0.7);
+    --dot-glow: rgba(180, 180, 220, 0.15);
+    --text-color: rgba(200, 200, 220, 0.35);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html, body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: var(--bg);
+    touch-action: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-user-select: none;
+    user-select: none;
+    font-family: system-ui, -apple-system, sans-serif;
+  }
+
+  /* Entry screen container */
+  #entry {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    z-index: 10;
+    transition: opacity 0.6s ease;
+  }
+
+  #entry.fading {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  #entry.hidden {
+    display: none;
+  }
+
+  /* Pulsing dot */
+  .pulse-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--dot-color);
+    box-shadow: 0 0 20px var(--dot-glow), 0 0 60px var(--dot-glow);
+    animation: pulse 6.5s ease-in-out infinite;
+    will-change: transform, opacity;
+  }
+
+  @keyframes pulse {
+    0%, 100% { transform: scale(1); opacity: 0.5; }
+    50% { transform: scale(1.8); opacity: 1; }
+  }
+
+  /* "touch" text */
+  .touch-text {
+    margin-top: 32px;
+    color: var(--text-color);
+    font-size: 14px;
+    font-weight: 300;
+    letter-spacing: 0.3em;
+    text-transform: lowercase;
+    animation: textFade 6.5s ease-in-out infinite;
+  }
+
+  @keyframes textFade {
+    0%, 100% { opacity: 0.25; }
+    50% { opacity: 0.5; }
+  }
+
+  /* Expansion overlay */
+  #expansion {
+    position: fixed;
+    inset: 0;
+    z-index: 5;
+    pointer-events: none;
+    opacity: 0;
+    background: radial-gradient(circle, rgba(180,180,220,0.08) 0%, transparent 70%);
+    transition: opacity 0.3s ease;
+  }
+
+  #expansion.active {
+    opacity: 1;
+  }
+
+  /* Canvas layer */
+  #mainCanvas {
+    position: fixed;
+    inset: 0;
+    z-index: 1;
+    display: block;
+  }
+
+  /* Phase indicator (debug, hidden in production) */
+  #phase {
+    position: fixed;
+    bottom: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    color: rgba(200,200,220,0.12);
+    font-size: 10px;
+    letter-spacing: 0.2em;
+    z-index: 20;
+    pointer-events: none;
+    text-transform: uppercase;
+    transition: opacity 0.8s ease;
+  }
+</style>
+</head>
+<body>
+
+<!-- Entry screen -->
+<div id="entry">
+  <div class="pulse-dot" id="pulseDot"></div>
+  <span class="touch-text">touch</span>
+</div>
+
+<!-- Expansion overlay for hold transition -->
+<div id="expansion"></div>
+
+<!-- Main render canvas -->
+<canvas id="mainCanvas"></canvas>
+
+<!-- Phase indicator (minimal, for debugging / subtle feedback) -->
+<div id="phase"></div>
+
+<script>
+// ──────────────────────────────────────
+// RESONANCE v0.1.0 — Entry Screen
+// ──────────────────────────────────────
+
+const DEBUG = true;
+
+// ── DOM refs ──────────────────────────
+const entry     = document.getElementById('entry');
+const pulseDot  = document.getElementById('pulseDot');
+const expansion = document.getElementById('expansion');
+const canvas    = document.getElementById('mainCanvas');
+const ctx       = canvas.getContext('2d');
+const phaseEl   = document.getElementById('phase');
+
+// ── State ─────────────────────────────
+let state        = 'IDLE';       // IDLE | HOLDING | TRANSITIONING | GEOMETRIC
+let holdTimer    = null;
+let holdStart    = 0;
+let holdActive   = false;
+let holdCancelled = false;
+const HOLD_MS    = 800;          // Hold threshold
+const TRANSITION_MS = 1200;      // Transition animation duration
+
+let transitionStart = 0;
+let transitionProgress = 0;
+
+// ── Audio ─────────────────────────────
+let audioCtx = null;
+
+function initAudio() {
+  if (audioCtx) return;
+  try {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (DEBUG) console.log('[Audio] Context created, state:', audioCtx.state);
+  } catch (e) {
+    console.warn('[Audio] Could not create AudioContext:', e);
+  }
+}
+
+// ── Audio Engine (3-layer) ────────────
+let audioNodes = null;  // { osc1, gain1, osc2, gain2, osc3, gain3 }
+
+function initAudioEngine() {
+  if (!audioCtx) return;
+  if (audioNodes) return; // already initialized
+
+  // Ensure context is running
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+
+  const now = audioCtx.currentTime;
+
+  // Layer 1 — base drone: sine ~55Hz (A1), -24dB
+  const osc1 = audioCtx.createOscillator();
+  const gain1 = audioCtx.createGain();
+  osc1.type = 'sine';
+  osc1.frequency.value = 55;
+  gain1.gain.value = 0; // starts silent
+  osc1.connect(gain1);
+  gain1.connect(audioCtx.destination);
+  osc1.start();
+
+  // Layer 2 — harmonic: triangle ~110Hz (A2)
+  const osc2 = audioCtx.createOscillator();
+  const gain2 = audioCtx.createGain();
+  osc2.type = 'triangle';
+  osc2.frequency.value = 110;
+  gain2.gain.value = 0;
+  osc2.connect(gain2);
+  gain2.connect(audioCtx.destination);
+  osc2.start();
+
+  // Layer 3 — resonance tone: sine ~440Hz (A4)
+  const osc3 = audioCtx.createOscillator();
+  const gain3 = audioCtx.createGain();
+  osc3.type = 'sine';
+  osc3.frequency.value = 440;
+  gain3.gain.value = 0;
+  osc3.connect(gain3);
+  gain3.connect(audioCtx.destination);
+  osc3.start();
+
+  audioNodes = { osc1, gain1, osc2, gain2, osc3, gain3 };
+
+  if (DEBUG) console.log('[Audio] Engine initialized — 3 layers ready');
+}
+
+function updateAudioEngine() {
+  if (!audioNodes || !audioCtx) return;
+  const { osc2, gain1, gain2, gain3 } = audioNodes;
+  const now = audioCtx.currentTime;
+
+  // Layer 1: base drone — always on when input is active
+  const droneOn = gActiveTouchCount > 0 || gInputType !== null;
+  const targetGain1 = droneOn ? 0.06 : 0; // -24dB
+  gain1.gain.setTargetAtTime(targetGain1, now, 0.05);
+
+  // Layer 2: harmonic — detune follows state
+  let detuneTarget = 15;   // CHAOS: dissonant
+  let gain2Target = droneOn ? 0.04 : 0;
+
+  if (geoState === GeoState.PATTERN) {
+    detuneTarget = 7;
+  } else if (geoState === GeoState.STABLE) {
+    detuneTarget = 0;
+  } else if (geoState === GeoState.RESONANCE) {
+    detuneTarget = 0;
+    gain2Target = 0.06;  // +3dB in resonance
+  }
+
+  osc2.detune.setTargetAtTime(detuneTarget, now, 0.1);
+  gain2.gain.setTargetAtTime(gain2Target, now, 0.05);
+
+  // Layer 3: resonance tone — only in RESONANCE
+  const gain3Target = (geoState === GeoState.RESONANCE) ? 0.05 : 0;
+  gain3.gain.setTargetAtTime(gain3Target, now, 0.08);
+}
+
+function shutdownAudioEngine() {
+  if (!audioNodes) return;
+  const now = audioCtx.currentTime;
+  audioNodes.gain1.gain.setTargetAtTime(0, now, 0.1);
+  audioNodes.gain2.gain.setTargetAtTime(0, now, 0.1);
+  audioNodes.gain3.gain.setTargetAtTime(0, now, 0.1);
+}
+
+// Visibility change: resume audio on return (phone call etc.)
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && audioCtx && audioCtx.state === 'suspended') {
+    audioCtx.resume();
+    if (DEBUG) console.log('[Audio] Context resumed (visibility change)');
+  }
+});
+
+// ── Canvas setup ──────────────────────
+function resizeCanvas() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width  = window.innerWidth  * dpr;
+  canvas.height = window.innerHeight * dpr;
+  canvas.style.width  = window.innerWidth  + 'px';
+  canvas.style.height = window.innerHeight + 'px';
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.scale(dpr, dpr);
+}
+
+window.addEventListener('resize', () => {
+  resizeCanvas();
+  if (state === 'GEOMETRIC') {
+    // Recenter geometry on resize
+    geoCx = window.innerWidth / 2;
+    geoCY = window.innerHeight / 2;
+  }
+});
+resizeCanvas();
+
+// ── Phase indicator (subtle) ──────────
+function setPhase(text) {
+  phaseEl.textContent = text;
+  if (text) {
+    phaseEl.style.opacity = '1';
+  } else {
+    phaseEl.style.opacity = '0';
+  }
+}
+
+// ── Hold detection ────────────────────
+let holdStartX = 0;
+let holdStartY = 0;
+
+function onTouchStart(e) {
+  if (state === 'TRANSITIONING') return;
+  if (state === 'GEOMETRIC') return; // handled by geometric phase later
+
+  // Init audio on first touch (browser policy)
+  initAudio();
+
+  e.preventDefault();
+  const t = e.touches[0];
+  holdStart = performance.now();
+  holdStartX = t.clientX;
+  holdStartY = t.clientY;
+  holdActive = true;
+  holdCancelled = false;
+
+  // Start hold timer
+  clearTimeout(holdTimer);
+  holdTimer = setTimeout(() => {
+    if (!holdActive || holdCancelled) return;
+    startTransition();
+  }, HOLD_MS);
+
+  if (DEBUG) console.log('[Input] touchstart — hold timer started');
+}
+
+function onTouchMove(e) {
+  if (!holdActive) return;
+  e.preventDefault();
+
+  // Cancel hold if finger moves more than 10px
+  if (e.touches.length === 1) {
+    const t = e.touches[0];
+    const dx = t.clientX - holdStartX;
+    const dy = t.clientY - holdStartY;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist > 10) {
+      holdCancelled = true;
+      clearTimeout(holdTimer);
+      if (DEBUG) console.log('[Input] touchmove — hold cancelled (moved', Math.round(dist), 'px)');
+    }
+  }
+}
+
+function onTouchEnd(e) {
+  if (!holdActive) return;
+  e.preventDefault();
+
+  holdActive = false;
+  clearTimeout(holdTimer);
+
+  const held = performance.now() - holdStart;
+  if (DEBUG) console.log('[Input] touchend — held', Math.round(held), 'ms');
+}
+
+function onTouchCancel(e) {
+  holdActive = false;
+  holdCancelled = true;
+  clearTimeout(holdTimer);
+}
+
+// ── Transition: Entry → Geometric ─────
+function startTransition() {
+  state = 'TRANSITIONING';
+  holdActive = false;
+  transitionStart = performance.now();
+
+  // Stop CSS pulse, snap dot to full opacity
+  pulseDot.style.animation = 'none';
+  pulseDot.style.transform = 'scale(1)';
+  pulseDot.style.opacity = '1';
+
+  // Activate expansion overlay
+  expansion.classList.add('active');
+
+  if (DEBUG) console.log('[Transition] Starting — entry → geometric');
+
+  setPhase('');
+
+  requestAnimationFrame(animateTransition);
+}
+
+function animateTransition(now) {
+  if (state !== 'TRANSITIONING') return;
+
+  const elapsed = now - transitionStart;
+  transitionProgress = Math.min(elapsed / TRANSITION_MS, 1);
+
+  // Ease out cubic for smooth end
+  const t = 1 - Math.pow(1 - transitionProgress, 3);
+
+  // Scale the dot up
+  const scale = 1 + t * 300; // eventually fills viewport
+  pulseDot.style.transform = `scale(${scale})`;
+
+  // Fade entry elements
+  entry.style.opacity = 1 - t * t; // fade out faster near end
+
+  // Draw expansion on canvas too (radial fill)
+  drawExpansion(t);
+
+  if (transitionProgress < 1) {
+    requestAnimationFrame(animateTransition);
+  } else {
+    finishTransition();
+  }
+}
+
+function drawExpansion(t) {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  // Subtle radial gradient that grows
+  const cx = window.innerWidth / 2;
+  const cy = window.innerHeight / 2;
+  const maxRadius = Math.max(window.innerWidth, window.innerHeight) * 0.8;
+  const radius = t * maxRadius;
+
+  if (radius > 0) {
+    const gradient = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
+    gradient.addColorStop(0, `rgba(180,180,220,${0.05 * t})`);
+    gradient.addColorStop(1, 'rgba(10,10,15,0)');
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
+  }
+}
+
+function finishTransition() {
+  // Hide entry screen completely
+  entry.classList.add('hidden');
+  expansion.classList.remove('active');
+
+  // Enter geometric phase (placeholder until Vaihe 3)
+  enterGeometricPhase();
+}
+
+// ── Geometric phase ──────────────────
+// ── Constants ─────────────────────────
+const GeoState = {
+  IDLE:        'IDLE',
+  CHAOS:       'CHAOS',
+  PATTERN:     'PATTERN',
+  STABLE:      'STABLE',
+  RESONANCE:   'RESONANCE',
+  TRANSITION:  'TRANSITION'
+};
+
+const TAP_MAX_MS    = 250;    // max tap duration
+const TAP_MAX_DIST  = 12;     // max tap movement px
+const BREAK_MS      = 800;    // gap > this = break
+const RHYTHM_WINDOW = 5;      // last N taps for rhythm calc
+const INACTIVITY_MS = 10000;  // CHAOS → IDLE timeout
+const N1_STABLE_MS  = 2000;   // input type stable for N1
+const N2_ZERO_BREAK_MS = 5000; // break_count == 0 for N2
+const RHYTHM_THRESH = 0.3;    // rhythm_score < this = good
+const FLOW_THRESH   = 0.2;    // flow_score < this = smooth
+const FORCE_LIMIT   = 0.5;    // force_score < this = not forcing
+const STABLE_TIME_MS = 3000;  // PATTERN → STABLE after this long with no breaks
+
+// ── Level system ──────────────────────
+let currentLevel = 1;
+const LEVEL_COUNT = 4;
+
+const LevelGeom = {
+  // Returns { sides, nodeCount, rotationSpeed, name }
+  config: function(level) {
+    switch (level) {
+      case 1: return { sides: 3, nodeCount: 3, rotationSpeed: 0, name: 'Triangle' };
+      case 2: return { sides: 6, nodeCount: 6, rotationSpeed: 0, name: 'Hexagon' };
+      case 3: return { sides: 12, nodeCount: 12, rotationSpeed: 0.0003, name: 'Moving Star' };
+      case 4: return { sides: 1, nodeCount: 1, rotationSpeed: 0, name: 'Void' };
+      default: return { sides: 3, nodeCount: 3, rotationSpeed: 0, name: 'Unknown' };
+    }
+  }
+};
+
+// ── Geometry ──────────────────────────
+let geoCx = window.innerWidth / 2;
+let geoCY = window.innerHeight / 2;
+let geoSize = Math.min(window.innerWidth, window.innerHeight) * 0.2;
+let geoRotation = 0;          // current rotation (for L3 moving star)
+
+function getGeometryPoints() {
+  const cfg = LevelGeom.config(currentLevel);
+  const pts = [];
+  const cx = geoCx;
+  const cy = geoCY;
+  const size = geoSize;
+  const rot = geoRotation;
+
+  if (cfg.sides === 1) {
+    // Level 4: Void — single point
+    pts.push({ x: cx, y: cy });
+  } else {
+    const startAngle = -Math.PI / 2 + rot;
+    for (let i = 0; i < cfg.sides; i++) {
+      const angle = startAngle + (Math.PI * 2 * i) / cfg.sides;
+      pts.push({
+        x: cx + Math.cos(angle) * size,
+        y: cy + Math.sin(angle) * size
+      });
+    }
+  }
+  return { pts, cfg };
+}
+
+// ── Geo state ─────────────────────────
+let geoState    = GeoState.IDLE;
+let geoStateMs  = 0;       // time in current state
+
+// ── Touch state (multi-touch) ─────────
+// Track all active touches by identifier
+let gTouches = {};          // touchId → { startX, startY, startMs, curX, curY, moved, lastDragX, lastDragY, lastDragMs }
+let gActiveTouchCount = 0;
+let gLastTapMs     = 0;
+let gLastDragMs   = 0;
+let gInputType    = null;   // 'tap' | 'hold' | 'drag' | null
+
+function getTouchData(id) {
+  if (!gTouches[id]) {
+    gTouches[id] = {
+      startX: 0, startY: 0, startMs: 0,
+      curX: 0, curY: 0, moved: false,
+      lastDragX: 0, lastDragY: 0, lastDragMs: 0
+    };
+  }
+  return gTouches[id];
+}
+
+function removeTouch(id) {
+  delete gTouches[id];
+  gActiveTouchCount = Object.keys(gTouches).length;
+}
+
+// ── Metrics ───────────────────────────
+let rhythmScore  = 1.0;
+let holdDuration = 0;
+let flowScore    = 1.0;
+let breakCount   = 0;
+let forceScore   = 0.5;
+
+let tapTimes     = [];       // last N tap timestamps
+let dragSpeeds   = [];       // last N drag speeds (px/s)
+let breakTimer   = null;
+let breakCheckMs = 0;
+let inactivityTimer = null;
+let inputTypeMs  = 0;        // how long current inputType has been stable
+let lastInputType = null;
+let geoStartMs = 0;          // when geometric phase started (for break grace period)
+const BREAK_GRACE_MS = 2000; // don't count breaks in first 2s
+
+// ── Node states ───────────────────────
+let n1Active = false;
+let n2Active = false;
+let n3Active = false;
+let n1StableSince = 0;
+let n2BreakSince  = 0;       // time since last break (for N2)
+let n3CheckMs     = 0;
+
+// ── Rendering ─────────────────────────
+let geoAnimFrame = null;
+let nodeGlowPhase = 0;
+
+// ── Event bindings (geometric phase) ──
+function bindGeoEvents() {
+  canvas.addEventListener('touchstart',  geoOnTouchStart,  { passive: false });
+  canvas.addEventListener('touchmove',   geoOnTouchMove,   { passive: false });
+  canvas.addEventListener('touchend',    geoOnTouchEnd,    { passive: false });
+  canvas.addEventListener('touchcancel', geoOnTouchCancel, { passive: false });
+
+  canvas.addEventListener('mousedown', geoOnMouseDown);
+  window.addEventListener('mousemove', geoOnMouseMove);
+  window.addEventListener('mouseup',   geoOnMouseUp);
+}
+
+function unbindGeoEvents() {
+  canvas.removeEventListener('touchstart',  geoOnTouchStart);
+  canvas.removeEventListener('touchmove',   geoOnTouchMove);
+  canvas.removeEventListener('touchend',    geoOnTouchEnd);
+  canvas.removeEventListener('touchcancel', geoOnTouchCancel);
+
+  canvas.removeEventListener('mousedown', geoOnMouseDown);
+  window.removeEventListener('mousemove', geoOnMouseMove);
+  window.removeEventListener('mouseup',   geoOnMouseUp);
+}
+
+// ── Touch handlers ────────────────────
+function geoOnTouchStart(e) {
+  if (state !== 'GEOMETRIC') return;
+  e.preventDefault();
+
+  for (let i = 0; i < e.touches.length; i++) {
+    const t = e.touches[i];
+    const td = getTouchData(t.identifier);
+    td.startX = t.clientX;
+    td.startY = t.clientY;
+    td.curX   = t.clientX;
+    td.curY   = t.clientY;
+    td.startMs = performance.now();
+    td.moved   = false;
+    td.lastDragX = t.clientX;
+    td.lastDragY = t.clientY;
+    td.lastDragMs = performance.now();
+  }
+  gActiveTouchCount = Object.keys(gTouches).length;
+
+  // Record trail at touch start
+  for (let id in gTouches) {
+    const td = gTouches[id];
+    recordTrailPoint(td.curX, td.curY);
+  }
+
+  // Clear inactivity timer on any touch
+  clearTimeout(inactivityTimer);
+  inactivityTimer = null;
+
+  if (geoState === GeoState.IDLE) {
+    transitionGeoState(GeoState.CHAOS);
+  }
+
+  if (DEBUG) console.log('[Geo] touchstart —', e.touches.length, 'finger(s)');
+}
+
+function geoOnTouchMove(e) {
+  if (gActiveTouchCount === 0) return;
+  e.preventDefault();
+
+  for (let i = 0; i < e.touches.length; i++) {
+    const t = e.touches[i];
+    const td = getTouchData(t.identifier);
+    td.curX = t.clientX;
+    td.curY = t.clientY;
+
+    const dx = t.clientX - td.startX;
+    const dy = t.clientY - td.startY;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+
+    if (dist > TAP_MAX_DIST) {
+      td.moved = true;
+      const pdx = t.clientX - td.lastDragX;
+      const pdy = t.clientY - td.lastDragY;
+      if (Math.abs(pdx) > 0.5 || Math.abs(pdy) > 0.5) {
+        geoCx += pdx;
+        geoCY += pdy;
+        td.lastDragX = t.clientX;
+        td.lastDragY = t.clientY;
+
+        const now = performance.now();
+        const dt = (now - td.lastDragMs) / 1000;
+        if (dt > 0.001) {
+          const speed = Math.sqrt(pdx * pdx + pdy * pdy) / dt;
+          dragSpeeds.push(speed);
+          if (dragSpeeds.length > 20) dragSpeeds.shift();
+        }
+        td.lastDragMs = now;
+
+        gInputType = 'drag';
+        gLastDragMs = now;
+      }
+    }
+    // Record trail for visual feedback
+    recordTrailPoint(td.curX, td.curY);
+  }
+}
+
+function geoOnTouchEnd(e) {
+  if (gActiveTouchCount === 0) return;
+  e.preventDefault();
+
+  let hadTap = false;
+  let wasDrag = false;
+
+  for (let i = 0; i < e.changedTouches.length; i++) {
+    const ct = e.changedTouches[i];
+    const td = gTouches[ct.identifier];
+    if (!td) continue;
+
+    const duration = performance.now() - td.startMs;
+    const dx = td.curX - td.startX;
+    const dy = td.curY - td.startY;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+
+    if (dist <= TAP_MAX_DIST && duration < TAP_MAX_MS) {
+      gInputType = 'tap';
+      recordTap(duration);
+      hadTap = true;
+    } else if (duration >= HOLD_MS && dist <= TAP_MAX_DIST) {
+      gInputType = 'hold';
+      holdDuration = duration;
+    } else if (dist > TAP_MAX_DIST) {
+      gInputType = 'drag';
+      wasDrag = true;
+      if (dy > 80 && Math.abs(dx) < Math.abs(dy) * 0.5 && duration < 500) {
+        if (DEBUG) console.log('[Geo] Swipe down — reset');
+        removeTouch(ct.identifier);
+        resetGeometric();
+        startInactivityTimer();
+        return;
+      }
+    }
+
+    removeTouch(ct.identifier);
+  }
+
+  if (hadTap || wasDrag) updateMetrics();
+
+  if (gActiveTouchCount === 0) {
+    startInactivityTimer();
+  }
+
+  if (DEBUG && (hadTap || wasDrag)) console.log('[Geo] touchend —', gInputType, '| active:', gActiveTouchCount,
+    '| state:', geoState, '| rhythm:', rhythmScore.toFixed(2), '| breaks:', breakCount,
+    '| flow:', flowScore.toFixed(2), '| force:', forceScore.toFixed(2));
+}
+
+function geoOnTouchCancel(e) {
+  gTouches = {};
+  gActiveTouchCount = 0;
+  startInactivityTimer();
+}
+
+// ── Mouse handlers (desktop dev) ──────
+// ── Mouse state (separate from touch) ──
+let gMouseActive  = false;
+let gMouseStartX  = 0;
+let gMouseStartY  = 0;
+let gMouseCurX    = 0;
+let gMouseCurY    = 0;
+let gMouseStartMs = 0;
+let gMouseDragX   = 0;
+let gMouseDragY   = 0;
+let gMouseDragMs  = 0;
+
+function geoOnMouseDown(e) {
+  if (state !== 'GEOMETRIC') return;
+  gMouseActive = true;
+  gMouseStartX = e.clientX;
+  gMouseStartY = e.clientY;
+  gMouseCurX   = e.clientX;
+  gMouseCurY   = e.clientY;
+  gMouseStartMs = performance.now();
+  gMouseDragX  = e.clientX;
+  gMouseDragY  = e.clientY;
+  gMouseDragMs = performance.now();
+  gInputType   = null;
+
+  clearTimeout(inactivityTimer);
+  inactivityTimer = null;
+
+  if (geoState === GeoState.IDLE) {
+    transitionGeoState(GeoState.CHAOS);
+  }
+}
+
+function geoOnMouseMove(e) {
+  if (!gMouseActive) return;
+  const dx = e.clientX - gMouseStartX;
+  const dy = e.clientY - gMouseStartY;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+
+  if (dist > TAP_MAX_DIST) {
+    const pdx = e.clientX - gMouseDragX;
+    const pdy = e.clientY - gMouseDragY;
+    if (Math.abs(pdx) > 0.5 || Math.abs(pdy) > 0.5) {
+      geoCx += pdx;
+      geoCY += pdy;
+      gMouseDragX = e.clientX;
+      gMouseDragY = e.clientY;
+
+      const now = performance.now();
+      const dt = (now - gMouseDragMs) / 1000;
+      if (dt > 0.001) {
+        const speed = Math.sqrt(pdx * pdx + pdy * pdy) / dt;
+        dragSpeeds.push(speed);
+        if (dragSpeeds.length > 20) dragSpeeds.shift();
+      }
+      gMouseDragMs = now;
+      gInputType = 'drag';
+      gLastDragMs = now;
+    }
+  }
+  gMouseCurX = e.clientX;
+  gMouseCurY = e.clientY;
+  // Record trail for mouse drag too
+  recordTrailPoint(gMouseCurX, gMouseCurY);
+}
+
+function geoOnMouseUp(e) {
+  if (!gMouseActive) return;
+  const duration = performance.now() - gMouseStartMs;
+  const dx = gMouseCurX - gMouseStartX;
+  const dy = gMouseCurY - gMouseStartY;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+
+  if (dist <= TAP_MAX_DIST && duration < TAP_MAX_MS) {
+    gInputType = 'tap';
+    recordTap(duration);
+  } else if (duration >= HOLD_MS && dist <= TAP_MAX_DIST) {
+    gInputType = 'hold';
+    holdDuration = duration;
+  } else if (dist > TAP_MAX_DIST) {
+    gInputType = 'drag';
+    if (dy > 80 && Math.abs(dx) < Math.abs(dy) * 0.5 && duration < 500) {
+      if (DEBUG) console.log('[Geo] Swipe down (mouse) — reset');
+      resetGeometric();
+      return;
+    }
+  }
+
+  updateMetrics();
+  gMouseActive = false;
+  startInactivityTimer();
+
+  if (DEBUG) console.log('[Geo] mouseup —', gInputType, '| state:', geoState,
+    '| rhythm:', rhythmScore.toFixed(2), '| breaks:', breakCount,
+    '| flow:', flowScore.toFixed(2), '| force:', forceScore.toFixed(2));
+}
+
+// ── Metrics ───────────────────────────
+function recordTap(duration) {
+  const now = performance.now();
+  tapTimes.push(now);
+  if (tapTimes.length > RHYTHM_WINDOW) tapTimes.shift();
+
+  // Update force_score from tap
+  // (tap doesn't have radius, keep last drag value or default)
+  gInputType = 'tap';
+}
+
+function updateMetrics() {
+  // rhythm_score: std dev of tap intervals (lower = more steady)
+  if (tapTimes.length >= 2) {
+    const intervals = [];
+    for (let i = 1; i < tapTimes.length; i++) {
+      intervals.push(tapTimes[i] - tapTimes[i - 1]);
+    }
+    const mean = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+    const variance = intervals.reduce((s, v) => s + (v - mean) ** 2, 0) / intervals.length;
+    rhythmScore = Math.min(1, Math.sqrt(variance) / 500); // normalize: 500ms std = score 1
+  }
+
+  // flow_score: variance of drag speeds (lower = smoother)
+  if (dragSpeeds.length >= 2) {
+    const mean = dragSpeeds.reduce((a, b) => a + b, 0) / dragSpeeds.length;
+    const variance = dragSpeeds.reduce((s, v) => s + (v - mean) ** 2, 0) / dragSpeeds.length;
+    flowScore = Math.min(1, variance / 50000); // normalize
+  }
+
+  // force_score: not updated from tap, persists from drag/hold
+  // For now, keep as neutral if no drag data
+  if (gInputType === 'drag' && dragSpeeds.length > 0) {
+    const avgSpeed = dragSpeeds.reduce((a, b) => a + b, 0) / dragSpeeds.length;
+    forceScore = Math.min(1, avgSpeed / 1000); // higher speed = more force
+  }
+
+  // break_count: detect gaps (only after rhythm established + grace period)
+  const nowForBreak = performance.now();
+  if (gInputType === 'tap' && tapTimes.length >= 2 && (nowForBreak - geoStartMs) > BREAK_GRACE_MS) {
+    clearTimeout(breakTimer);
+    breakTimer = setTimeout(() => {
+      // Only increment if enough time has passed since last tap
+      const lastTap = tapTimes[tapTimes.length - 1];
+      if (performance.now() - lastTap >= BREAK_MS) {
+        breakCount++;
+        if (DEBUG) console.log('[Break] FIRED — count:', breakCount, '| state:', geoState, '| lastTap:', Math.round(performance.now() - lastTap), 'ms ago');
+        if (geoState === GeoState.PATTERN && breakCount >= 3) {
+          transitionGeoState(GeoState.CHAOS);
+        }
+        if (geoState === GeoState.STABLE && breakCount >= 3) {
+          transitionGeoState(GeoState.PATTERN);
+        }
+      }
+    }, BREAK_MS);
+  }
+
+  // Track input type stability for N1
+  if (gInputType && gInputType === lastInputType) {
+    inputTypeMs += (performance.now() - (inputTypeMs > 0 ? inputTypeMs : performance.now()));
+  } else {
+    inputTypeMs = 0;
+    lastInputType = gInputType;
+  }
+  inputTypeMs = gInputType === lastInputType ? inputTypeMs : 0;
+  if (gInputType) lastInputType = gInputType;
+
+  // Force score from touch radius (mobile)
+  // We don't have radius from mouse events, so keep default for desktop
+
+  evaluateNodes();
+  evaluateStateTransitions();
+}
+
+// ── Node evaluation ───────────────────
+function evaluateNodes() {
+  const now = performance.now();
+
+  // N1: "lopeta räpeltäminen" — steady rhythm, stable input type
+  if (rhythmScore < RHYTHM_THRESH && gInputType && lastInputType === gInputType) {
+    if (!n1Active) {
+      n1StableSince = n1StableSince || now;
+      if (now - n1StableSince > N1_STABLE_MS) {
+        n1Active = true;
+        if (DEBUG) console.log('[Node] N1 ACTIVE — rhythm stable');
+      }
+    }
+  } else {
+    if (n1Active && rhythmScore >= RHYTHM_THRESH) {
+      n1Active = false;
+      n1StableSince = 0;
+      if (DEBUG) console.log('[Node] N1 lost');
+    }
+    n1StableSince = 0;
+  }
+
+  // N2: "älä katkaise" — break_count == 0 for 5s
+  if (breakCount === 0) {
+    n2BreakSince = n2BreakSince || now;
+    if (now - n2BreakSince > N2_ZERO_BREAK_MS) {
+      if (!n2Active) {
+        n2Active = true;
+        if (DEBUG) console.log('[Node] N2 ACTIVE — no breaks');
+      }
+    }
+  } else {
+    n2Active = false;
+    n2BreakSince = 0;
+    if (DEBUG && n2Active) console.log('[Node] N2 lost — break');
+  }
+
+  // N3: "älä pakota" — smooth flow, low force, steady rhythm
+  if (flowScore < FLOW_THRESH && forceScore < FORCE_LIMIT && rhythmScore < RHYTHM_THRESH) {
+    if (!n3Active) {
+      n3Active = true;
+      if (DEBUG) console.log('[Node] N3 ACTIVE — not forcing');
+    }
+  } else {
+    if (n3Active) {
+      n3Active = false;
+      if (DEBUG) console.log('[Node] N3 lost');
+    }
+  }
+}
+
+// ── State transitions ─────────────────
+function evaluateStateTransitions() {
+  const now = performance.now();
+
+  // CHAOS → PATTERN: rhythm recognized
+  if (geoState === GeoState.CHAOS) {
+    if (rhythmScore < RHYTHM_THRESH && tapTimes.length >= 3) {
+      transitionGeoState(GeoState.PATTERN);
+    }
+  }
+
+  // PATTERN → STABLE: no breaks for STABLE_TIME_MS
+  if (geoState === GeoState.PATTERN) {
+    if (breakCount === 0 && (now - geoStateMs) > STABLE_TIME_MS) {
+      transitionGeoState(GeoState.STABLE);
+    }
+  }
+
+  // STABLE → RESONANCE: all 3 nodes active
+  if (geoState === GeoState.STABLE) {
+    if (n1Active && n2Active && n3Active) {
+      transitionGeoState(GeoState.RESONANCE);
+    }
+  }
+
+  // RESONANCE → TRANSITION: short delay then unlock
+  if (geoState === GeoState.RESONANCE) {
+    if (now - geoStateMs > 500) {
+      triggerUnlock();
+    }
+  }
+}
+
+function transitionGeoState(newState) {
+  const oldState = geoState;
+  geoState = newState;
+  geoStateMs = performance.now();
+
+  if (DEBUG) console.log('[State]', oldState, '→', newState);
+
+  // Reset on state loss
+  if (newState === GeoState.CHAOS) {
+    // Don't clear everything, just reset break context
+  }
+
+  if (newState === GeoState.IDLE) {
+    breakCount = 0;
+    n1Active = false;
+    n2Active = false;
+    n3Active = false;
+    tapTimes = [];
+  }
+}
+
+// ── Inactivity ─────────────────────────
+function startInactivityTimer() {
+  clearTimeout(inactivityTimer);
+  inactivityTimer = setTimeout(() => {
+    if (geoState === GeoState.CHAOS && !gTouchActive) {
+      if (DEBUG) console.log('[State] CHAOS → IDLE (inactivity)');
+      transitionGeoState(GeoState.IDLE);
+    }
+  }, INACTIVITY_MS);
+}
+
+// ── Unlock trigger ────────────────────
+// ── Dissolve animation ────────────────
+let dissolveParticles = [];
+let dissolveActive = false;
+let dissolveStartMs = 0;
+const DISSOLVE_DURATION = 1500;
+const DISSOLVE_PARTICLE_COUNT = 120;
+
+function triggerUnlock() {
+  if (geoState !== GeoState.RESONANCE) return;
+  transitionGeoState(GeoState.TRANSITION);
+
+  if (DEBUG) console.log('[Unlock] RESONANCE → TRANSITION');
+
+  // Haptic: try vibration, fallback to audio pulse
+  if (navigator.vibrate) {
+    navigator.vibrate([50, 30, 50]);
+  } else if (audioCtx) {
+    // iOS fallback: short 30Hz pulse
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = 30;
+    gain.gain.setValueAtTime(0.08, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.15);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + 0.15);
+  }
+
+  // Shutdown audio layers
+  shutdownAudioEngine();
+
+  // 500ms delay (tension), then dissolve
+  setTimeout(() => {
+    startDissolve();
+  }, 500);
+}
+
+function startDissolve() {
+  dissolveActive = true;
+  dissolveStartMs = performance.now();
+  dissolveParticles = [];
+
+  const pts = window.__triPts || getGeometryPoints().pts;
+  const n = pts.length;
+
+  // Generate particles from geometry edges
+  for (let i = 0; i < DISSOLVE_PARTICLE_COUNT; i++) {
+    let x, y;
+
+    if (n <= 1) {
+      // Void: particles from center
+      x = pts[0].x + (Math.random() - 0.5) * 20;
+      y = pts[0].y + (Math.random() - 0.5) * 20;
+    } else {
+      // Pick a random point on an edge
+      const edge = Math.floor(Math.random() * n);
+      const p1 = pts[edge];
+      const p2 = pts[(edge + 1) % n];
+      const t = Math.random();
+      x = p1.x + (p2.x - p1.x) * t;
+      y = p1.y + (p2.y - p1.y) * t;
+    }
+
+    // Add slight offset
+    const ox = (Math.random() - 0.5) * 4;
+    const oy = (Math.random() - 0.5) * 4;
+
+    dissolveParticles.push({
+      x: x + ox,
+      y: y + oy,
+      ox: x + ox,
+      oy: y + oy,
+      vx: (Math.random() - 0.5) * 250,
+      vy: (Math.random() - 0.5) * 250,
+      life: 0.6 + Math.random() * 0.4,
+      size: 1 + Math.random() * 3,
+      hue: 220 + Math.random() * 40
+    });
+  }
+
+  if (DEBUG) console.log('[Dissolve] Started —', dissolveParticles.length, 'particles');
+}
+
+function updateDissolve(now) {
+  if (!dissolveActive) return;
+
+  const elapsed = now - dissolveStartMs;
+  const progress = Math.min(elapsed / DISSOLVE_DURATION, 1);
+
+  // Ease in-out
+  const t = progress < 0.5
+    ? 2 * progress * progress
+    : -1 + (4 - 2 * progress) * progress;
+
+  dissolveParticles.forEach(p => {
+    // Phase 1 (0-0.6): spread outward
+    // Phase 2 (0.6-1.0): converge to new shape (hexagon)
+    if (progress < 0.6) {
+      const phase1 = progress / 0.6;
+      p.x = p.ox + p.vx * phase1;
+      p.y = p.oy + p.vy * phase1;
+    } else {
+      // Converge to next level's geometry points
+      const phase2 = (progress - 0.6) / 0.4;
+      const nextLevel = (currentLevel % LEVEL_COUNT) + 1;
+      const nextCfg = LevelGeom.config(nextLevel);
+      const nextPts = [];
+      const nextSides = nextCfg.sides;
+      if (nextSides <= 1) {
+        // Void: converge to center point
+        const idx = dissolveParticles.indexOf(p);
+        const angle = (Math.PI * 2 * idx) / dissolveParticles.length;
+        const r = geoSize * 0.3 * (1 - phase2);
+        nextPts.push({ x: geoCx + Math.cos(angle) * r, y: geoCY + Math.sin(angle) * r });
+      }
+      const idx = dissolveParticles.indexOf(p);
+      const angle = (Math.PI * 2 * idx) / dissolveParticles.length;
+      const targetR = nextSides <= 1 ? geoSize * 0.05 : geoSize * 0.8;
+      const tx = geoCx + Math.cos(angle) * targetR * (0.5 + 0.5 * phase2);
+      const ty = geoCY + Math.sin(angle) * targetR * (0.5 + 0.5 * phase2);
+
+      p.x = p.x + (tx - p.x) * 0.08;
+      p.y = p.y + (ty - p.y) * 0.08;
+    }
+
+    // Fade out over time
+    p.alpha = 0.7 * (1 - progress * 0.5) * p.life;
+    p.size = p.size * (1 - progress * 0.3);
+  });
+
+  if (progress >= 1) {
+    finishDissolve();
+  }
+}
+
+function drawDissolve() {
+  if (!dissolveActive) return;
+
+  dissolveParticles.forEach(p => {
+    ctx.fillStyle = `rgba(${180 + Math.floor(Math.random()*40)},${180 + Math.floor(Math.random()*40)},${220 + Math.floor(Math.random()*35)},${p.alpha})`;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, Math.max(0.3, p.size), 0, Math.PI * 2);
+    ctx.fill();
+  });
+}
+
+function finishDissolve() {
+  dissolveActive = false;
+  dissolveParticles = [];
+
+  // Advance to next level (cycle 1→2→3→4→1)
+  currentLevel = (currentLevel % LEVEL_COUNT) + 1;
+  const cfg = LevelGeom.config(currentLevel);
+
+  if (DEBUG) console.log('[Dissolve] Complete → Level', currentLevel, cfg.name);
+
+  // Brief pause for the new geometry to emerge, then re-enter
+  setTimeout(() => {
+    enterGeometricPhase();
+  }, 250);
+}
+
+// ── Reset ─────────────────────────────
+function resetGeometric() {
+  geoState = GeoState.IDLE;
+  geoStateMs = performance.now();
+  geoCx = window.innerWidth / 2;
+  geoCY = window.innerHeight / 2;
+  rhythmScore = 1.0;
+  holdDuration = 0;
+  flowScore = 1.0;
+  breakCount = 0;
+  forceScore = 0.5;
+  tapTimes = [];
+  dragSpeeds = [];
+  n1Active = false;
+  n2Active = false;
+  n3Active = false;
+  n1StableSince = 0;
+  n2BreakSince = 0;
+  clearTimeout(breakTimer);
+  clearTimeout(inactivityTimer);
+  geoStartMs = performance.now();
+
+  if (DEBUG) console.log('[Geo] Reset — IDLE');
+}
+
+// ── Enter geometric phase ─────────────
+function enterGeometricPhase() {
+  state = 'GEOMETRIC';
+  initAudioEngine();
+  resetGeometric();
+  bindGeoEvents();
+  setPhase('');
+
+  const cfg = LevelGeom.config(currentLevel);
+  geoRotation = 0;
+
+  if (DEBUG) console.log('[State] Now GEOMETRIC — Level', currentLevel, cfg.name);
+
+  // Start render loop
+  if (!geoAnimFrame) {
+    geoAnimFrame = requestAnimationFrame(geoRenderLoop);
+  }
+}
+
+// ── Render loop ───────────────────────
+function geoRenderLoop(now) {
+  if (state !== 'GEOMETRIC') {
+    geoAnimFrame = null;
+    return;
+  }
+  geoAnimFrame = requestAnimationFrame(geoRenderLoop);
+
+  updateAudioEngine();
+  updateDissolve(now);
+  evaluateStateTransitions();
+  nodeGlowPhase += 0.03;
+  updateTrailParticles(now);
+
+  // State-aware background
+  ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+  ctx.fillStyle = getBackgroundColor();
+  ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
+
+  // Subtle ambient glow based on state + active nodes
+  drawAmbientGlow();
+
+  // Touch trail particles (before geometry)
+  drawTrailParticles();
+
+  if (dissolveActive) {
+    drawDissolve();
+  } else {
+    // Update rotation for moving levels
+    const cfg = LevelGeom.config(currentLevel);
+    if (cfg.rotationSpeed > 0) {
+      geoRotation += cfg.rotationSpeed * 16; // ~60fps delta
+    }
+    drawGeometry();
+    drawNodes();
+  }
+}
+
+// ── Background effects ────────────────
+function getBackgroundColor() {
+  let r = 10, g = 10, b = 15;
+  if (geoState === GeoState.CHAOS) {
+    r = 18; g = 10; b = 12; // warm tension
+  } else if (geoState === GeoState.PATTERN) {
+    r = 11; g = 10; b = 14; // neutral
+  } else if (geoState === GeoState.STABLE) {
+    r = 10; g = 11; b = 17; // cool calm
+  } else if (geoState === GeoState.RESONANCE) {
+    r = 13; g = 13; b = 22; // bright climax
+  }
+  if (n3Active) { r += 1; b += 2; }
+  return `rgb(${r},${g},${b})`;
+}
+
+function drawAmbientGlow() {
+  const cx = window.innerWidth / 2;
+  const cy = window.innerHeight / 2;
+  const radius = Math.max(window.innerWidth, window.innerHeight) * 0.6;
+  let alpha = 0, color = '180,180,220';
+
+  if (geoState === GeoState.CHAOS) {
+    alpha = 0.02; color = '200,150,150';
+  } else if (geoState === GeoState.PATTERN) {
+    alpha = 0.025; color = '180,180,220';
+  } else if (geoState === GeoState.STABLE) {
+    alpha = 0.04; color = '160,190,240';
+  } else if (geoState === GeoState.RESONANCE) {
+    alpha = 0.06 + Math.sin(nodeGlowPhase) * 0.02; color = '200,200,255';
+  }
+  if (n1Active) alpha += 0.005;
+  if (n2Active) alpha += 0.01;
+  if (n3Active) alpha += 0.015;
+
+  if (alpha > 0) {
+    const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
+    grad.addColorStop(0, `rgba(${color},${alpha})`);
+    grad.addColorStop(1, `rgba(${color},0)`);
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
+  }
+}
+
+// ── Touch trail particles ─────────────
+let trailParticles = [];
+const MAX_TRAIL = 60;
+
+function recordTrailPoint(x, y) {
+  const c = Math.min(1, Math.max(0, flowScore * 3)); // chaos from flow
+  trailParticles.push({ x, y, age: 0, maxAge: 30 + Math.random() * 20, size: 1 + Math.random() * 2, chaos: c });
+  if (trailParticles.length > MAX_TRAIL) trailParticles.shift();
+}
+
+function updateTrailParticles(now) {
+  for (let i = trailParticles.length - 1; i >= 0; i--) {
+    const p = trailParticles[i];
+    p.age++;
+    p.x += (Math.random() - 0.5) * p.chaos * 3;
+    p.y += (Math.random() - 0.5) * p.chaos * 3;
+    if (p.age > p.maxAge) trailParticles.splice(i, 1);
+  }
+}
+
+function drawTrailParticles() {
+  trailParticles.forEach(p => {
+    const life = 1 - p.age / p.maxAge;
+    const alpha = life * 0.3;
+    const r = 160 + p.chaos * 60 | 0;
+    const g = 180 - p.chaos * 60 | 0;
+    const b = 220 - p.chaos * 80 | 0;
+    ctx.fillStyle = `rgba(${r},${g},${b},${alpha})`;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, Math.max(0.3, p.size * life), 0, Math.PI * 2);
+    ctx.fill();
+  });
+}
+
+function drawGeometry() {
+  const { pts, cfg } = getGeometryPoints();
+  if (pts.length < 2) return;
+
+  // CHAOS wobble — geometry shakes when user is erratic
+  const wobble = (geoState === GeoState.CHAOS) ? 4 + Math.sin(nodeGlowPhase * 8) * 2 : 0;
+  const wobblePts = pts.map(p => ({
+    x: p.x + (Math.random() - 0.5) * wobble,
+    y: p.y + (Math.random() - 0.5) * wobble
+  }));
+
+  let lineAlpha = 0.12, lineWidth = 1;
+  if (geoState === GeoState.STABLE || geoState === GeoState.RESONANCE) {
+    lineAlpha = 0.35; lineWidth = 1.5;
+  }
+  if (n3Active) { lineAlpha = 0.6; lineWidth = 2; }
+  if (geoState === GeoState.RESONANCE) {
+    lineAlpha = 0.5 + Math.sin(nodeGlowPhase * 2) * 0.15;
+  }
+
+  ctx.strokeStyle = `rgba(180,180,220,${lineAlpha})`;
+  ctx.lineWidth = lineWidth;
+  ctx.beginPath();
+  ctx.moveTo(wobblePts[0].x, wobblePts[0].y);
+  for (let i = 1; i < wobblePts.length; i++) ctx.lineTo(wobblePts[i].x, wobblePts[i].y);
+  ctx.closePath();
+  ctx.stroke();
+  window.__triPts = pts;
+}
+
+function drawNodes() {
+  const pts = window.__triPts;
+  if (!pts || pts.length === 0) return;
+
+  const nodeRadius = 5;
+  const isVoid = currentLevel === 4;
+  const breath = 0.7 + 0.3 * Math.sin(nodeGlowPhase * 1.5);
+
+  if (isVoid) { drawVoidNode(pts[0], nodeRadius); return; }
+
+  // Map N1/N2/N3 to geometry nodes
+  const nodeMap = [];
+  const totalPts = pts.length;
+  if (totalPts === 3) {
+    nodeMap.push({ pts: [0], nodeId: 1 });
+    nodeMap.push({ pts: [1], nodeId: 2 });
+    nodeMap.push({ pts: [2], nodeId: 3 });
+  } else {
+    const perNode = Math.floor(totalPts / 3);
+    for (let n = 0; n < 3; n++) {
+      const indices = [];
+      const start = n * perNode;
+      const end = (n === 2) ? totalPts : (n + 1) * perNode;
+      for (let i = start; i < end; i++) indices.push(i);
+      nodeMap.push({ pts: indices, nodeId: n + 1 });
+    }
+  }
+
+  nodeMap.forEach(({ pts: indices, nodeId }) => {
+    const active = (nodeId === 1 && n1Active) || (nodeId === 2 && n2Active) || (nodeId === 3 && n3Active);
+    let nodeAlpha = active ? 0.7 + (nodeId - 1) * 0.1 : 0.12;
+    let glowAlpha = active ? 0.2 + (nodeId - 1) * 0.1 : 0;
+    let radius = active ? nodeRadius * breath : nodeRadius;
+
+    if (geoState === GeoState.RESONANCE) {
+      glowAlpha = 0.4 + Math.sin(nodeGlowPhase * 3 + nodeId) * 0.3;
+      nodeAlpha = 0.8 + Math.sin(nodeGlowPhase * 2 + nodeId) * 0.2;
+      radius = nodeRadius * (0.8 + 0.4 * Math.sin(nodeGlowPhase * 2 + nodeId));
+    }
+    if (nodeId === 3 && n3Active && geoState !== GeoState.RESONANCE) {
+      glowAlpha = 0.2 + Math.sin(nodeGlowPhase * 2) * 0.1;
+    }
+
+    indices.forEach(i => {
+      if (i >= pts.length) return;
+      const p = pts[i];
+      if (glowAlpha > 0) {
+        const glowR = radius * (2.5 + 1.5 * breath);
+        const g = ctx.createRadialGradient(p.x, p.y, radius * 0.3, p.x, p.y, glowR);
+        g.addColorStop(0, `rgba(200,200,255,${glowAlpha * breath})`);
+        g.addColorStop(1, 'rgba(200,200,255,0)');
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, glowR, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      // Node dot
+      ctx.fillStyle = `rgba(200,200,240,${nodeAlpha * breath})`;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
+      ctx.fill();
+      // Active nodes: bright inner core
+      if (active) {
+        ctx.fillStyle = `rgba(230,230,255,${0.5 * breath})`;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, radius * 0.4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    });
+  });
+}
+
+function drawVoidNode(pt, nodeRadius) {
+  // All 3 resonance keys converge to the single point
+  const activeCount = (n1Active ? 1 : 0) + (n2Active ? 1 : 0) + (n3Active ? 1 : 0);
+  const allActive = n1Active && n2Active && n3Active;
+
+  let nodeAlpha = 0.12 + activeCount * 0.2;
+  let glowAlpha = activeCount * 0.08;
+  let ringCount = activeCount;
+
+  if (geoState === GeoState.RESONANCE || allActive) {
+    glowAlpha = 0.3 + Math.sin(nodeGlowPhase * 2) * 0.2;
+    nodeAlpha = 0.7 + Math.sin(nodeGlowPhase * 3) * 0.3;
+    ringCount = 3;
+  }
+
+  // Concentric rings for each active resonance
+  for (let r = 0; r < ringCount; r++) {
+    const ringR = nodeRadius * (2 + r * 2.5);
+    const ringAlpha = glowAlpha * (1 - r * 0.25);
+
+    ctx.strokeStyle = `rgba(200,200,255,${ringAlpha})`;
+    ctx.lineWidth = 0.5;
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, ringR, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  // Glow
+  if (glowAlpha > 0) {
+    const glow = ctx.createRadialGradient(pt.x, pt.y, 0, pt.x, pt.y, nodeRadius * 6);
+    glow.addColorStop(0, `rgba(200,200,255,${glowAlpha})`);
+    glow.addColorStop(1, 'rgba(200,200,255,0)');
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, nodeRadius * 6, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Central dot
+  ctx.fillStyle = `rgba(220,220,255,${nodeAlpha})`;
+  ctx.beginPath();
+  ctx.arc(pt.x, pt.y, nodeRadius * 1.3, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+// ── Event bindings ────────────────────
+// Entry screen events (only active during IDLE entry phase)
+entry.addEventListener('touchstart',  onTouchStart,  { passive: false });
+entry.addEventListener('touchmove',   onTouchMove,   { passive: false });
+entry.addEventListener('touchend',    onTouchEnd,    { passive: false });
+entry.addEventListener('touchcancel', onTouchCancel, { passive: false });
+
+// Mouse fallback for entry screen
+entry.addEventListener('mousedown', (e) => {
+  holdStart = performance.now();
+  holdStartX = e.clientX;
+  holdStartY = e.clientY;
+  holdActive = true;
+  holdCancelled = false;
+  initAudio();
+
+  clearTimeout(holdTimer);
+  holdTimer = setTimeout(() => {
+    if (!holdActive || holdCancelled) return;
+    startTransition();
+  }, HOLD_MS);
+
+  if (DEBUG) console.log('[Input] mousedown — hold timer started');
+});
+
+window.addEventListener('mousemove', (e) => {
+  if (!holdActive) return;
+  const dx = e.clientX - holdStartX;
+  const dy = e.clientY - holdStartY;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  if (dist > 10) {
+    holdCancelled = true;
+    clearTimeout(holdTimer);
+    if (DEBUG) console.log('[Input] mousemove — hold cancelled (moved', Math.round(dist), 'px)');
+  }
+});
+
+entry.addEventListener('mouseup', (e) => {
+  holdActive = false;
+  clearTimeout(holdTimer);
+  const held = performance.now() - holdStart;
+  if (DEBUG) console.log('[Input] mouseup — held', Math.round(held), 'ms');
+});
+
+entry.addEventListener('mouseleave', () => {
+  holdActive = false;
+  holdCancelled = true;
+  clearTimeout(holdTimer);
+});
+
+// ── Init ──────────────────────────────
+// Expose for debugging
+window.__resonance = {
+  getState: () => state,
+  getGeoState: () => geoState,
+  getMetrics: () => ({ rhythmScore, holdDuration, flowScore, breakCount, forceScore }),
+  getNodes: () => ({ n1: n1Active, n2: n2Active, n3: n3Active }),
+  getLevel: () => ({ level: currentLevel, name: LevelGeom.config(currentLevel).name }),
+  // Debug: force unlock
+  debugForceResonance: () => {
+    n1Active = true; n2Active = true; n3Active = true;
+    transitionGeoState(GeoState.RESONANCE);
+  }
+};
+
+if (DEBUG) {
+  console.log('══════════════════════════════════');
+  console.log(' Resonance v0.1.0');
+  console.log(' State: IDLE');
+  console.log(' Hold threshold:', HOLD_MS, 'ms');
+  console.log(' Levels:', LEVEL_COUNT, '(Triangle → Hexagon → Star → Void)');
+  console.log('══════════════════════════════════');
+}
+
+setPhase('');
+</script>
+
+</body>
+</html>
