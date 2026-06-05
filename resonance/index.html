@@ -563,6 +563,27 @@ let n1StableSince = 0;
 let n2BreakSince  = 0;       // time since last break (for N2)
 let n3CheckMs     = 0;
 
+// ── Node hint labels ──────────────────
+const LABEL_FADE_MS = 3000;
+const NODE_LABELS = [
+  { id: 1, text: 'lepää',   hint: 'rytmi vakaa — hellitä ote' },
+  { id: 2, text: 'jatka',   hint: 'katkeamaton — jatka samaa' },
+  { id: 3, text: 'hellitä', hint: 'hellitä — älä pakota' }
+];
+let nodeLabels = [
+  { active: false, startMs: 0, text: '', x: 0, y: 0 },
+  { active: false, startMs: 0, text: '', x: 0, y: 0 },
+  { active: false, startMs: 0, text: '', x: 0, y: 0 }
+];
+
+function showNodeLabel(idx, text, x, y) {
+  nodeLabels[idx].active = true;
+  nodeLabels[idx].startMs = performance.now();
+  nodeLabels[idx].text = text;
+  nodeLabels[idx].x = x;
+  nodeLabels[idx].y = y;
+}
+
 // ── Rendering ─────────────────────────
 let geoAnimFrame = null;
 let nodeGlowPhase = 0;
@@ -907,6 +928,9 @@ function evaluateNodes() {
       if (now - n1StableSince > N1_STABLE_MS) {
         n1Active = true;
         if (DEBUG) console.log('[Node] N1 ACTIVE — rhythm stable');
+        // Show hint label
+        const pts = window.__triPts;
+        if (pts) showNodeLabel(0, NODE_LABELS[0].text, pts[0].x, pts[0].y - 18);
       }
     }
   } else {
@@ -925,6 +949,14 @@ function evaluateNodes() {
       if (!n2Active) {
         n2Active = true;
         if (DEBUG) console.log('[Node] N2 ACTIVE — no breaks');
+        const pts = window.__triPts;
+        const nodeMap = [];
+        const n = pts ? pts.length : 0;
+        if (n === 3) { nodeMap.push(1); }
+        else { for(let j=Math.floor(n/3); j<Math.floor(2*n/3); j++) nodeMap.push(j); }
+        const mid = nodeMap.length ? Math.floor(nodeMap.length/2) : 0;
+        const idx25 = nodeMap[mid] || (pts ? 1 : 0);
+        if (pts && pts[idx25]) showNodeLabel(1, NODE_LABELS[1].text, pts[idx25].x, pts[idx25].y - 18);
       }
     }
   } else {
@@ -938,6 +970,11 @@ function evaluateNodes() {
     if (!n3Active) {
       n3Active = true;
       if (DEBUG) console.log('[Node] N3 ACTIVE — not forcing');
+      const pts = window.__triPts;
+      if (pts) {
+        const lastIdx = pts.length - 1;
+        showNodeLabel(2, NODE_LABELS[2].text, pts[lastIdx].x, pts[lastIdx].y - 18);
+      }
     }
   } else {
     if (n3Active) {
@@ -1256,6 +1293,7 @@ function geoRenderLoop(now) {
     }
     drawGeometry();
     drawNodes();
+    drawNodeLabels();
   }
 }
 
@@ -1436,6 +1474,42 @@ function drawNodes() {
         ctx.fill();
       }
     });
+  });
+}
+
+// ── Node hint labels ─────────────────
+function drawNodeLabels() {
+  const now = performance.now();
+  nodeLabels.forEach((lbl, idx) => {
+    if (!lbl.active) return;
+    const elapsed = now - lbl.startMs;
+    if (elapsed > LABEL_FADE_MS) { lbl.active = false; return; }
+
+    // Fade: first 0.5s full opacity, then gradual fade over 2.5s
+    const fade = elapsed < 500 ? 1 : 1 - (elapsed - 500) / (LABEL_FADE_MS - 500);
+    const alpha = Math.max(0, fade * 0.85);
+
+    // Cosmic gradient text
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    const fontSize = 11 + 3 * fade;
+    ctx.font = `300 ${fontSize}px system-ui, -apple-system, sans-serif`;
+    ctx.letterSpacing = '0.3em';
+
+    // Gradient fill — cosmic purple → cyan → white
+    const grad = ctx.createLinearGradient(lbl.x - 30, lbl.y, lbl.x + 30, lbl.y);
+    grad.addColorStop(0, `rgba(180,140,255,${alpha})`);
+    grad.addColorStop(0.5, `rgba(140,200,255,${alpha})`);
+    grad.addColorStop(1, `rgba(200,180,255,${alpha})`);
+    ctx.fillStyle = grad;
+
+    // Subtle glow behind text
+    ctx.shadowColor = `rgba(160,160,255,${alpha * 0.4})`;
+    ctx.shadowBlur = 8;
+
+    ctx.fillText(lbl.text, lbl.x, lbl.y);
+    ctx.restore();
   });
 }
 
