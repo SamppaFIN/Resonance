@@ -178,106 +178,307 @@ function initAudio() {
   }
 }
 
-// ── Audio Engine (3-layer) ────────────
-let audioNodes = null;  // { osc1, gain1, osc2, gain2, osc3, gain3 }
+// ── SID Engine: C64-style 3-channel synthesizer ──
+// Classical melodies adapted for Commodore 64 SID chip emulation
+// Channels: 1=Triangle (lead), 2=Sawtooth (fill), 3=Pulse (accent) + PWM
+
+// ── Note frequency table (A4 = 440 Hz) ──
+const NOTE_F = {
+  C2:65.41,  D2:73.42,  Eb2:77.78, E2:82.41,  F2:87.31,  Gb2:92.50, Fs2:92.50, G2:98.00,  Ab2:103.83, A2:110.00, Bb2:116.54, As2:116.54, B2:123.47,
+  C3:130.81, D3:146.83, Eb3:155.56, E3:164.81, F3:174.61, Gb3:185.00, Fs3:185.00, G3:196.00, Ab3:207.65, A3:220.00, Bb3:233.08, As3:233.08, B3:246.94,
+  C4:261.63, D4:293.66, Eb4:311.13, E4:329.63, F4:349.23, Gb4:369.99, Fs4:369.99, G4:392.00, Ab4:415.30, A4:440.00, Bb4:466.16, As4:466.16, B4:493.88,
+  Cs4:277.18, Cs5:554.37,
+  C5:523.25, D5:587.33, E5:659.25, F5:698.46, G5:783.99, A5:880.00,
+  REST:0
+};
+
+// ── Level-based classical melody fragments ──
+// Each level has its own 3-channel melodies per state
+// Level 1: Sibelius — Finlandia (hymn theme)
+// Level 2: Grieg — In the Hall of the Mountain King (Peer Gynt)
+// Levels 3+: default classical set (Beethoven, Bach, Satie)
+
+const LEVEL_MELODIES = {
+  // ═══ Level 1: Finlandia (Sibelius) ═══
+  1: {
+    CHAOS: { // brooding opening, tense brass motif
+      ch1: ['B2','D3','B2','G2', 'A2','C3','A2','Fs2'],
+      ch2: ['G1','G1','G1','G1', 'D2','D2','D2','D2'],
+      ch3: ['D3','Fs3','D3','B2', 'C3','E3','C3','A2']
+    },
+    PATTERN: { // hymn begins to emerge, still tentative
+      ch1: ['G3','G3','Fs3','G3', 'A3','G3','Fs3','E3'],
+      ch2: ['G2','G2','D3','G3', 'D3','G2','D3','G3'],
+      ch3: ['B3','D4','A3','B3', 'C4','B3','A3','G3']
+    },
+    STABLE: { // full Finlandia hymn — majestic, calm strength
+      ch1: ['G4','G4','Fs4','G4','A4', 'G4','Fs4','E4','D4', 'E4','Fs4','G4','A4','B4', 'A4','G4','Fs4','G4'],
+      ch2: ['G2','D3','G3','D3','G3', 'C3','G3','C3','G3', 'G2','D3','G3','D3','G3', 'D3','G3','D3','G2'],
+      ch3: ['B3','B3','A3','B3','C4', 'B3','A3','G3','Fs3', 'G3','A3','B3','C4','D4', 'C4','B3','A3','B3']
+    },
+    RESONANCE: { // hymn climax — triumphant, full chords
+      ch1: ['G4','A4','B4','C5','B4', 'A4','G4','Fs4','G4', 'G4','A4','B4','C5','D5', 'C5','B4','A4','G4'],
+      ch2: ['G2','G2','G2','G2','G2', 'C3','C3','C3','C3', 'G2','G2','D3','D3','D3', 'G3','G3','D3','G2'],
+      ch3: ['B3','C4','D4','E4','D4', 'C4','B3','A3','B3', 'B3','C4','D4','E4','Fs4', 'E4','D4','C4','B3']
+    }
+  },
+  // ═══ Level 2: Mountain King (Grieg) ═══
+  2: {
+    CHAOS: { // slow, ominous — the troll awakens
+      ch1: ['B2','B2','As2','B2','Cs3', 'B2','As2','B2','Cs3','D3'],
+      ch2: ['B1','B1','B1','B1','B1', 'Fs1','Fs1','Fs1','Fs1','Fs1'],
+      ch3: ['D3','D3','Cs3','D3','E3', 'D3','Cs3','D3','E3','Fs3']
+    },
+    PATTERN: { // pace quickens — trolls begin to stir
+      ch1: ['B3','B3','As3','B3','Cs4', 'B3','As3','B3','Cs4','D4', 'B3','B3','As3','B3','Cs4', 'B3','As3','Fs3'],
+      ch2: ['B2','Fs2','B2','Fs2','B2', 'Fs2','Cs3','Fs2','Cs3','Fs2', 'B2','Fs2','B2','Fs2','B2', 'Fs2','Cs3','Fs2'],
+      ch3: ['D4','D4','Cs4','D4','E4', 'D4','Cs4','D4','E4','Fs4', 'D4','D4','Cs4','D4','E4', 'D4','Cs4','A3']
+    },
+    STABLE: { // full chase — relentless, driving
+      ch1: ['B3','B3','As3','B3','Cs4', 'B3','As3','B3','Cs4','D4', 'B3','B3','As3','B3','Cs4', 'B3','As3','Fs3','B3','B3'],
+      ch2: ['B2','Fs2','B2','Fs2','B2', 'Fs2','Cs3','Fs2','Cs3','Fs2', 'B2','Fs2','B2','Fs2','B2', 'Fs2','Cs3','Fs2','Cs3','Fs2'],
+      ch3: ['D4','D4','Cs4','D4','E4', 'D4','Cs4','D4','E4','Fs4', 'D4','D4','Cs4','D4','E4', 'D4','Cs4','A3','D4','D4']
+    },
+    RESONANCE: { // crash + silence — king's hall collapses
+      ch1: ['B4','B4','As4','B4','Cs5', 'D5','Cs5','B4','As4','B4', 'REST','REST','REST','REST', 'REST','REST'],
+      ch2: ['B2','B2','B2','B2','B2', 'Fs2','Fs2','Fs2','Fs2','Fs2', 'B2','B2','B2','REST', 'REST','REST'],
+      ch3: ['D4','D4','Cs4','D4','E4', 'Fs4','E4','D4','Cs4','D4', 'REST','REST','REST','REST', 'REST','REST']
+    }
+  }
+};
+
+// ── Default melodies (Level 3+): Beethoven, Bach, Satie ──
+const MEL_CHAOS_CH1   = ['G3','G3','G3','Eb3', 'F3','F3','F3','D3'];
+const MEL_CHAOS_CH2   = ['G2','G2','G2','G2',  'F2','F2','F2','F2'];
+const MEL_CHAOS_CH3   = ['G4','Eb4','G4','Eb4', 'F4','D4','F4','D4'];
+
+const MEL_PATTERN_CH1 = ['C3','E3','G3','C4', 'E4','C4','G3','E3'];
+const MEL_PATTERN_CH2 = ['C2','C3','G2','G3', 'A2','A3','F2','F3'];
+const MEL_PATTERN_CH3 = ['E4','C4','G3','E3', 'C4','G3','E3','C3'];
+
+const MEL_STABLE_CH1  = ['G3','A3','B3','A3', 'G3','Gb3','E3','D3'];
+const MEL_STABLE_CH2  = ['G2','D3','A2','E3', 'B2','Gb3','D3','G2'];
+const MEL_STABLE_CH3  = ['B3','A3','G3','Gb3', 'E3','D3','E3','Gb3'];
+
+const MEL_RES_CH1     = ['E4','E4','F4','G4', 'G4','F4','E4','D4', 'C4','C4','D4','E4', 'E4','D4','D4','REST'];
+const MEL_RES_CH2     = ['C3','G3','C3','G3', 'C3','G3','C3','G3', 'C3','G3','C3','G3', 'C3','G3','C3','G3'];
+const MEL_RES_CH3     = ['C4','E4','G4','C5', 'G4','E4','C4','G3', 'E4','C4','G3','E3', 'C4','G3','E3','C3'];
+
+// ── Melody lookup (level-aware) ──
+function getMelodyArray(ch, st, lvl) {
+  const set = LEVEL_MELODIES[lvl];
+  if (set && set[st]) {
+    return set[st]['ch' + ch] || ['REST'];
+  }
+  // Fallback: default classical set for levels 3+
+  if (st === GeoState.CHAOS)     return ch === 1 ? MEL_CHAOS_CH1   : ch === 2 ? MEL_CHAOS_CH2   : MEL_CHAOS_CH3;
+  if (st === GeoState.PATTERN)   return ch === 1 ? MEL_PATTERN_CH1 : ch === 2 ? MEL_PATTERN_CH2 : MEL_PATTERN_CH3;
+  if (st === GeoState.STABLE)    return ch === 1 ? MEL_STABLE_CH1  : ch === 2 ? MEL_STABLE_CH2  : MEL_STABLE_CH3;
+  if (st === GeoState.RESONANCE) return ch === 1 ? MEL_RES_CH1     : ch === 2 ? MEL_RES_CH2     : MEL_RES_CH3;
+  return ['REST'];
+}
+
+function getNoteMs(st) {
+  if (st === GeoState.CHAOS)     return 140;  // frantic 16th
+  if (st === GeoState.PATTERN)   return 200;  // steady 8th
+  if (st === GeoState.STABLE)    return 300;  // calm quarter
+  if (st === GeoState.RESONANCE) return 420;  // majestic
+  return 500;
+}
+
+// ── SID Engine state ──
+let sidNodes = null; // { ch1_osc,ch1_gain,ch1_filt,ch1_clip, ch2_..., ch3_..., master, lfo, lfoGain }
+let sidStep      = { ch1:0, ch2:0, ch3:0 };
+let sidNextMs    = 0;
+let sidLastState = null;
 
 function initAudioEngine() {
   if (!audioCtx) return;
-  if (audioNodes) return; // already initialized
+  if (sidNodes) return;
 
-  // Ensure context is running
   if (audioCtx.state === 'suspended') audioCtx.resume();
 
-  const now = audioCtx.currentTime;
+  // ── Master dynamics compressor (SID-style glue + warmth) ──
+  const master = audioCtx.createDynamicsCompressor();
+  master.threshold.setValueAtTime(-28, audioCtx.currentTime);
+  master.knee.setValueAtTime(12, audioCtx.currentTime);
+  master.ratio.setValueAtTime(5, audioCtx.currentTime);
+  master.attack.setValueAtTime(0.003, audioCtx.currentTime);
+  master.release.setValueAtTime(0.1, audioCtx.currentTime);
+  master.connect(audioCtx.destination);
 
-  // Layer 1 — flute drone: sine 432 Hz (grounding) + gentle filter
-  const osc1 = audioCtx.createOscillator();
-  const gain1 = audioCtx.createGain();
-  const filter1 = audioCtx.createBiquadFilter();
-  osc1.type = 'sine';
-  osc1.frequency.value = 432;
-  filter1.type = 'lowpass';
-  filter1.frequency.value = 800;
-  filter1.Q.value = 0.5;
-  gain1.gain.value = 0;
-  osc1.connect(filter1);
-  filter1.connect(gain1);
-  gain1.connect(audioCtx.destination);
-  osc1.start();
+  // ── Channel factory: osc → filter → wave-shaper (soft-clip) → gain → master ──
+  function makeChannel(type, filtHz, q) {
+    const osc  = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    const filt = audioCtx.createBiquadFilter();
+    const clip = audioCtx.createWaveShaper();
 
-  // Layer 2 — flute harmonic: triangle 528 Hz (transformation) + filter
-  const osc2 = audioCtx.createOscillator();
-  const gain2 = audioCtx.createGain();
-  const filter2 = audioCtx.createBiquadFilter();
-  osc2.type = 'triangle';
-  osc2.frequency.value = 528;
-  filter2.type = 'lowpass';
-  filter2.frequency.value = 1200;
-  filter2.Q.value = 0.5;
-  gain2.gain.value = 0;
-  osc2.connect(filter2);
-  filter2.connect(gain2);
-  gain2.connect(audioCtx.destination);
-  osc2.start();
+    osc.type = type;
+    osc.frequency.value = 220;
+    gain.gain.value = 0;
 
-  // Layer 3 — ethereal flute: sine 963 Hz (divine) + filter
-  const osc3 = audioCtx.createOscillator();
-  const gain3 = audioCtx.createGain();
-  const filter3 = audioCtx.createBiquadFilter();
-  osc3.type = 'sine';
-  osc3.frequency.value = 963;
-  filter3.type = 'lowpass';
-  filter3.frequency.value = 2000;
-  filter3.Q.value = 0.3;
-  gain3.gain.value = 0;
-  osc3.connect(filter3);
-  filter3.connect(gain3);
-  gain3.connect(audioCtx.destination);
-  osc3.start();
+    filt.type = 'lowpass';
+    filt.frequency.value = filtHz;
+    filt.Q.value = q;
 
-  audioNodes = { osc1, gain1, osc2, gain2, osc3, gain3 };
+    // Soft-clip curve: tanh approximation for SID analog warmth
+    const n = 256;
+    const curve = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const x = (i - n / 2) / (n / 4); // range -2..2
+      curve[i] = Math.tanh(x) * 0.85;
+    }
+    clip.curve = curve;
 
-  if (DEBUG) console.log('[Audio] Engine — 432/528/963 Hz Solfeggio flute');
-}
+    osc.connect(filt);
+    filt.connect(clip);
+    clip.connect(gain);
+    gain.connect(master);
+    osc.start();
 
-function updateAudioEngine() {
-  if (!audioNodes || !audioCtx) return;
-  const { osc2, gain1, gain2, gain3 } = audioNodes;
-  const now = audioCtx.currentTime;
-
-  // Layer 1: base drone 432 Hz — grounding, always on with input
-  const droneOn = gActiveTouchCount > 0 || gInputType !== null;
-  const targetGain1 = droneOn ? 0.03 : 0;
-  gain1.gain.setTargetAtTime(targetGain1, now, 0.05);
-
-  // Layer 2: 528 Hz — detune follows state (0 = pure, +20 = dissonant)
-  let detuneTarget = 20;   // CHAOS: out of tune
-  let gain2Target = droneOn ? 0.025 : 0;
-
-  if (geoState === GeoState.PATTERN) {
-    detuneTarget = 10;
-  } else if (geoState === GeoState.STABLE) {
-    detuneTarget = 0;
-    gain2Target = 0.035;
-  } else if (geoState === GeoState.RESONANCE) {
-    detuneTarget = 0;
-    gain2Target = 0.05;
+    return { osc, gain, filt, clip };
   }
 
-  osc2.detune.setTargetAtTime(detuneTarget, now, 0.1);
-  gain2.gain.setTargetAtTime(gain2Target, now, 0.05);
+  const ch1 = makeChannel('triangle', 1800, 1.2); // lead: soft, filtered
+  const ch2 = makeChannel('sawtooth', 1400, 0.9); // fill: rich, gritty
+  const ch3 = makeChannel('square',    2200, 0.7); // accent: hollow, bright (pulse=PWM via LFO)
 
-  // Layer 3: 963 Hz — only in RESONANCE (divine awakening)
-  const gain3Target = (geoState === GeoState.RESONANCE) ? 0.04 : 0;
-  gain3.gain.setTargetAtTime(gain3Target, now, 0.08);
+  // ── LFO for PWM (pulse width modulation) on Channel 3 ──
+  const lfo = audioCtx.createOscillator();
+  const lfoGain = audioCtx.createGain();
+  lfo.type = 'sine';
+  lfo.frequency.value = 1.5; // Hz — slow PWM sweep
+  lfoGain.gain.value = 18;   // modulation depth (cents)
+  lfo.connect(lfoGain);
+  lfoGain.connect(ch3.osc.detune); // detune wobble ~= pulse width shift
+  lfo.start();
+
+  sidNodes = {
+    ch1_osc:ch1.osc, ch1_gain:ch1.gain, ch1_filt:ch1.filt, ch1_clip:ch1.clip,
+    ch2_osc:ch2.osc, ch2_gain:ch2.gain, ch2_filt:ch2.filt, ch2_clip:ch2.clip,
+    ch3_osc:ch3.osc, ch3_gain:ch3.gain, ch3_filt:ch3.filt, ch3_clip:ch3.clip,
+    master, lfo, lfoGain
+  };
+
+  if (DEBUG) console.log('[SID] Engine initialized — C64 3ch synth + classical melodies');
 }
 
-function shutdownAudioEngine() {
-  if (!audioNodes) return;
+// ── ADSR note trigger (C64 style: fast attack, decay to sustain) ──
+function sidNoteOn(ch, freq, velocity, now) {
+  const s = sidNodes;
+  if (!s) return;
+  const osc  = ch === 1 ? s.ch1_osc  : ch === 2 ? s.ch2_osc  : s.ch3_osc;
+  const gain = ch === 1 ? s.ch1_gain : ch === 2 ? s.ch2_gain : s.ch3_gain;
+
+  if (freq > 0) {
+    osc.frequency.setTargetAtTime(freq, now, 0.003); // fast portamento slide
+  }
+  // ADSR: A=3ms → D=60ms → S=65% (release on next note)
+  gain.gain.cancelScheduledValues(now);
+  gain.gain.setValueAtTime(gain.gain.value || 0, now);
+  gain.gain.linearRampToValueAtTime(velocity,        now + 0.003); // Attack
+  gain.gain.setTargetAtTime(velocity * 0.35,         now + 0.008, 0.04); // Decay → Sustain
+}
+
+function sidNoteOff(ch, now) {
+  const s = sidNodes;
+  if (!s) return;
+  const gain = ch === 1 ? s.ch1_gain : ch === 2 ? s.ch2_gain : s.ch3_gain;
+  gain.gain.setTargetAtTime(0, now + 0.002, 0.025); // Release: quick fade
+}
+
+// ── Main audio update — called every frame from render loop ──
+function updateAudioEngine() {
+  if (!sidNodes || !audioCtx) return;
   const now = audioCtx.currentTime;
-  audioNodes.gain1.gain.setTargetAtTime(0, now, 0.1);
-  audioNodes.gain2.gain.setTargetAtTime(0, now, 0.1);
-  audioNodes.gain3.gain.setTargetAtTime(0, now, 0.1);
+  const st = geoState;
+
+  // State change → reset sequencer
+  if (st !== sidLastState) {
+    sidStep.ch1 = 0; sidStep.ch2 = 0; sidStep.ch3 = 0;
+    sidNextMs = 0;
+    sidLastState = st;
+  }
+
+  const droneOn = gActiveTouchCount > 0 || gInputType !== null || st === GeoState.RESONANCE;
+  if (!droneOn && st !== GeoState.RESONANCE) {
+    // No input: fade all channels
+    if (sidNodes.ch1_gain.gain.value > 0.001) sidNodes.ch1_gain.gain.setTargetAtTime(0, now, 0.08);
+    if (sidNodes.ch2_gain.gain.value > 0.001) sidNodes.ch2_gain.gain.setTargetAtTime(0, now, 0.08);
+    if (sidNodes.ch3_gain.gain.value > 0.001) sidNodes.ch3_gain.gain.setTargetAtTime(0, now, 0.08);
+    return;
+  }
+
+  const noteMs = getNoteMs(st);
+  const audioNow = audioCtx.currentTime * 1000; // ms for sequencer clock
+
+  if (audioNow >= sidNextMs) {
+    // Slight human feel (±15% timing variation)
+    sidNextMs = audioNow + noteMs * (0.85 + Math.random() * 0.3);
+
+    // ── Per-state detune, velocity & filter settings ──
+    let d1 = 0, d2 = 0, d3 = 0;         // detune (cents)
+    let fc1 = 1800, fc2 = 1400, fc3 = 2200; // filter cutoff (Hz)
+    let v1 = 0.007, v2 = 0.006, v3 = 0.004;  // velocity — very quiet
+
+    if (st === GeoState.CHAOS) {
+      d1 = (Math.random() - 0.5) * 40; d2 = (Math.random() - 0.5) * 50; d3 = (Math.random() - 0.5) * 30;
+      v1 = 0.008; v2 = 0.007; v3 = 0.005;
+    } else if (st === GeoState.PATTERN) {
+      d1 = (Math.random() - 0.5) * 15; d2 = (Math.random() - 0.5) * 20;
+      v1 = 0.008; v2 = 0.007;
+    } else if (st === GeoState.STABLE) {
+      // Pure, no detune
+      v1 = 0.006; v2 = 0.005; v3 = 0.004;
+      if (sidNodes.lfo) sidNodes.lfo.frequency.setTargetAtTime(1.5, now, 0.1); // slow PWM
+    } else if (st === GeoState.RESONANCE) {
+      v1 = 0.010; v2 = 0.008; v3 = 0.007;
+      // Filter sweep: gradually open (800 → 6000 Hz)
+      const rp = Math.min(1, (performance.now() - geoStateMs) / 3000);
+      const sw = 800 + rp * 5200;
+      fc1 = sw; fc2 = sw * 0.8; fc3 = sw * 1.1;
+      if (sidNodes.lfo) sidNodes.lfo.frequency.setTargetAtTime(3.0, now, 0.15); // fast sparkle
+    }
+
+    // Apply filter cutoffs
+    sidNodes.ch1_filt.frequency.setTargetAtTime(fc1, now, 0.08);
+    sidNodes.ch2_filt.frequency.setTargetAtTime(fc2, now, 0.08);
+    sidNodes.ch3_filt.frequency.setTargetAtTime(fc3, now, 0.08);
+
+    // ── Play next note on each channel ──
+    function playStep(chNum, vel) {
+      const mel = getMelodyArray(chNum, st, currentLevel);
+      if (!mel || mel.length === 0) return;
+      const idx = sidStep['ch' + chNum] % mel.length;
+      const freq = NOTE_F[mel[idx]] || 0;
+      if (freq > 0) {
+        sidNoteOn(chNum, freq, vel, now);
+      } else {
+        sidNoteOff(chNum, now); // REST note
+      }
+      sidStep['ch' + chNum] = (idx + 1) % mel.length;
+    }
+
+    playStep(1, v1);
+    playStep(2, v2);
+    playStep(3, v3);
+
+    // Apply detune
+    sidNodes.ch1_osc.detune.setTargetAtTime(d1, now, 0.05);
+    sidNodes.ch2_osc.detune.setTargetAtTime(d2, now, 0.05);
+    sidNodes.ch3_osc.detune.setTargetAtTime(d3, now, 0.05);
+  }
+}
+
+// ── Shutdown: fade all channels to silence ──
+function shutdownAudioEngine() {
+  if (!sidNodes) return;
+  const now = audioCtx.currentTime;
+  sidNodes.ch1_gain.gain.setTargetAtTime(0, now, 0.15);
+  sidNodes.ch2_gain.gain.setTargetAtTime(0, now, 0.15);
+  sidNodes.ch3_gain.gain.setTargetAtTime(0, now, 0.15);
+  if (DEBUG) console.log('[SID] Shutdown — fade to silence');
 }
 
 // Visibility change: resume audio on return (phone call etc.)
@@ -636,15 +837,15 @@ function resetTasks() {
 }
 
 function checkTaskTap() {
-  if (tapTimes.length >= 5 && rhythmScore < 0.3) tasksDone.tap = true;
+  if (tapTimes.length >= 5 && rhythmScore < 0.3) { tasksDone.tap = true; if (DEBUG) console.log('[Task] tap DONE — rhythm:', rhythmScore.toFixed(3), 'taps:', tapTimes.length); }
 }
 
 function checkTaskGentle() {
-  if (forceScore < 0.5 && rhythmScore < 0.3) tasksDone.gentle = true;
+  if (forceScore < 0.5 && rhythmScore < 0.3) { tasksDone.gentle = true; if (DEBUG) console.log('[Task] gentle DONE — force:', forceScore.toFixed(3), 'rhythm:', rhythmScore.toFixed(3)); }
 }
 
 function checkTaskDrag(fingers) {
-  if (fingers >= 1 && dragSpeeds.length >= 5 && flowScore < 0.2) tasksDone.drag_1 = true;
+  if (fingers >= 1 && dragSpeeds.length >= 5 && flowScore < 0.3) { tasksDone.drag_1 = true; if (DEBUG) console.log('[Task] drag_1 DONE — flow:', flowScore.toFixed(3), 'speeds:', dragSpeeds.length); }
   if (fingers >= 2 && dragSpeeds.length >= 5 && flowScore < 0.3) tasksDone.drag_2 = true;
   if (fingers >= 3 && dragSpeeds.length >= 5 && flowScore < 0.4) tasksDone.drag_3 = true;
   if (fingers >= 4 && dragSpeeds.length >= 5 && flowScore < 0.5) tasksDone.drag_4 = true;
@@ -1009,11 +1210,6 @@ function recordTap(duration) {
 }
 
 function updateMetrics() {
-  // Task checks
-  checkTaskTap();
-  checkTaskGentle();
-  checkTaskDrag(maxFingers);
-
   // rhythm_score: std dev of tap intervals (lower = more steady)
   if (tapTimes.length >= 2) {
     const intervals = [];
@@ -1080,6 +1276,11 @@ function updateMetrics() {
 
   // Force score from touch radius (mobile)
   // We don't have radius from mouse events, so keep default for desktop
+
+  // Task checks — after metrics are fresh
+  checkTaskTap();
+  checkTaskGentle();
+  checkTaskDrag(maxFingers);
 
   evaluateNodes();
   evaluateStateTransitions();
